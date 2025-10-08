@@ -84,7 +84,7 @@ class Player:
         drain = 0.006 * intensity * (100 - (0.6*self.sta + 0.4*self.pac)) / 100
         self.fatigue = min(0.7, self.fatigue + max(0.0, drain))
 
-@dataclass(eq=False)
+@dataclass
 class Team:
     name: str; color: Tuple[int,int,int]; alt: Tuple[int,int,int]
     players: List[Player]; subs: List[Player]
@@ -251,49 +251,31 @@ class ManagerAI:
 
         # forced subs for injuries
         for p in injuries:
-            if p.on_pitch and p.injured and self.subs_used < self.max_subs:
-                bench = self._bench_candidates()
+            if p.on_pitch and p.injured and self.subs_used<self.max_subs:
+                bench=[s for s in self.t.subs if not s.on_pitch and not s.used_sub]
                 # try to match position first
-                positional = [s for s in bench if s.pos == p.pos]
-                pool = positional or bench
-                if not pool:
-                    continue
-                sub = self._best_option(pool)
-                if sub and self.t.make_substitution(p, sub):
-                    self.subs_used += 1
+                positional=[s for s in bench if s.pos==p.pos]
+                pool=positional or bench
+                if pool:
+                    sub=max(pool, key=lambda s:(s.sta+s.pac+s.pas))
+                    if self.t.make_substitution(p, sub):
+                        self.subs_used+=1
 
         # planned subs
-        if self.subs_used < self.max_subs and minute >= 58:
-            tired = sorted(
-                [p for p in self.t.players if p.on_pitch and p.pos != "GK"],
-                key=lambda q: q.fatigue + (0.15 if q.yellow else 0),
-                reverse=True,
-            )
-            bench = self._bench_candidates()
+        if self.subs_used<self.max_subs and minute>=58:
+            tired=sorted([p for p in self.t.players if p.on_pitch and p.pos!="GK"],
+                         key=lambda q:q.fatigue + (0.15 if q.yellow else 0), reverse=True)
+            bench=[s for s in self.t.subs if not s.on_pitch and not s.used_sub]
             if tired and bench:
-                off = tired[0]
-                need_att = diff < 0 and minute >= 65
-                need_def = diff > 0 and minute >= 70
-
-                def line(p):
-                    return p.pos if p.pos in ("DF", "MF", "FW") else "MF"
-
-                pool = [s for s in bench if line(s) == line(off)]
-                if need_att:
-                    att_pool = [s for s in bench if s.pos == "FW"]
-                    if att_pool:
-                        pool = att_pool
-                if need_def:
-                    def_pool = [s for s in bench if s.pos == "DF"]
-                    if def_pool:
-                        pool = def_pool
-                if not pool:
-                    pool = bench
-                if pool:
-                    sub = self._best_option(pool)
-                    if sub and self.t.make_substitution(off, sub):
-                        self.subs_used += 1
-                        self.last_min = minute
+                off=tired[0]
+                need_att=(diff<0 and minute>=65); need_def=(diff>0 and minute>=70)
+                def line(p): return p.pos if p.pos in ("DF","MF","FW") else "MF"
+                pool=[s for s in bench if line(s)==line(off)]
+                if need_att: pool=[s for s in bench if s.pos=="FW"] or pool
+                if need_def: pool=[s for s in bench if s.pos=="DF"] or pool
+                sub=max(pool, key=lambda s:(s.sta+s.pac+s.pas))
+                if self.t.make_substitution(off, sub):
+                    self.subs_used+=1; self.last_min=minute
 def clamp(v,a,b): return max(a, min(b, v))
 
 class Match:
@@ -326,13 +308,6 @@ class Match:
         self.manager_positions = {}
         self.bench_spots = {}
         self.dribble_phase = 0.0
-        self.release_player: Optional[Player] = None
-        self.release_timer = 0.0
-        self.goal_flash_timer = 0.0
-        self.goal_flash_duration = 0.0
-        self.goal_flash_text = ""
-        self.goal_flash_color = (255, 255, 255)
-        self.in_stoppage = False
 
     # ---------- helpers ----------
     def add_commentary(self, text: str):
@@ -347,50 +322,27 @@ class Match:
         y = self.pr.y + (ym/PITCH_WID_M)*self.pr.h
         return x,y
 
-    def reset_for_kickoff(self):
-        if not self.pr:
-            return
-        ah=[self.m2p(*t) for t in anchors_for(self.H.formation, True)]
-        aa=[self.m2p(*t) for t in anchors_for(self.A.formation, False)]
-        for i,p in enumerate(self.H.players):
-            if i < len(ah) and p.on_pitch:
-                p.x,p.y=ah[i]
-            p.vx=p.vy=0.0
-        for i,p in enumerate(self.A.players):
-            if i < len(aa) and p.on_pitch:
-                p.x,p.y=aa[i]
-            p.vx=p.vy=0.0
-
     def kickoff(self, pr: pygame.Rect):
         self.pr=pr
-        self.reset_for_kickoff()
+        ah=[self.m2p(*t) for t in anchors_for(self.H.formation, True)]
+        aa=[self.m2p(*t) for t in anchors_for(self.A.formation, False)]
+        for i,p in enumerate(self.H.players): p.x,p.y=ah[i]
+        for i,p in enumerate(self.A.players): p.x,p.y=aa[i]
         self.place_ball_center()
         self.holder = min((self.H.players if self.poss is self.H else self.A.players),
                           key=lambda p: (p.x-self.ball[0])**2+(p.y-self.ball[1])**2)
         self.gk_hands=False; self.gk_hold_timer=0.0
         # sideline setup
-        outer_offset = max(24, min(max(self.pr.x - 12, 0), 48))
-        screen_width = self.pr.right + self.pr.x
-        left_margin = self.pr.x
-        right_margin = max(screen_width - self.pr.right, 0)
-        if left_margin >= 36:
-            home_lane = self.pr.x - min(outer_offset, left_margin - 12)
-        else:
-            home_lane = self.pr.x + 24
-        if right_margin >= 36:
-            away_lane = self.pr.right + min(outer_offset, right_margin - 12)
-        else:
-            away_lane = self.pr.right - 24
         self.manager_positions = {
-            id(self.H): (home_lane, self.pr.y + self.pr.h * 0.35),
-            id(self.A): (away_lane, self.pr.y + self.pr.h * 0.65),
+            id(self.H): (self.pr.x - 50, self.pr.y + self.pr.h * 0.35),
+            id(self.A): (self.pr.right + 50, self.pr.y + self.pr.h * 0.65),
         }
 
         def bench_slots(team: Team, left: bool):
-            lane_x = home_lane if left else away_lane
+            base_x = self.pr.x - 70 if left else self.pr.right + 70
             start_y = self.pr.y + 90
             step = 28
-            return [(lane_x, start_y + i * step) for i in range(12)]
+            return [(base_x, start_y + i * step) for i in range(12)]
 
         self.bench_spots = {
             id(self.H): bench_slots(self.H, True),
@@ -415,7 +367,19 @@ class Match:
     def update_bench_positions(self):
         if not self.pr:
             return
-        for team in (self.H, self.A):
+        for team, _ in ((self.H, True), (self.A, False)):
+            spots = self.bench_spots.get(id(team), [])
+            benchers = [p for p in team.subs if not p.on_pitch]
+            benchers += [p for p in team.benched if not p.on_pitch]
+            for idx, player in enumerate(benchers):
+                if idx < len(spots):
+                    player.x, player.y = spots[idx]
+                    player.vx = player.vy = 0.0
+
+    def update_bench_positions(self):
+        if not self.pr:
+            return
+        for team, _ in ((self.H, True), (self.A, False)):
             spots = self.bench_spots.get(id(team), [])
             benchers = [p for p in team.subs if not p.on_pitch]
             benchers += [p for p in team.benched if not p.on_pitch]
@@ -500,8 +464,6 @@ class Match:
         self.restart=('dfk', x, y, team); self.deadball_timer=STOPPAGE_PAUSE
         self.gk_hands=False
         self.pass_target=None
-        self.release_player=None
-        self.release_timer=0.0
         self.add_commentary(f"Direct free-kick for {team.name}")
 
     def indirect_free_kick(self, team:Team, x, y, reason="IFK"):
@@ -509,8 +471,6 @@ class Match:
         self.restart=('ifk', x, y, team, reason); self.deadball_timer=STOPPAGE_PAUSE
         self.gk_hands=False
         self.pass_target=None
-        self.release_player=None
-        self.release_timer=0.0
         self.add_commentary(f"Indirect free-kick for {team.name} ({reason})")
 
     # ---------- keeper behaviours ----------
@@ -621,25 +581,15 @@ class Match:
             self.phase_reset=True
             self.bvx=self.bvy=self.bvz=0.0
             self.restart=('kickoff', self.pr.x+self.pr.w/2, self.pr.y+self.pr.h/2, dfn);
-            self.deadball_timer = max(2.2, STOPPAGE_PAUSE + 0.6)
+            self.deadball_timer = max(1.2, STOPPAGE_PAUSE)
             self.holder=None; self.gk_hands=False
             self.pass_target=None
-            self.goal_flash_timer = 2.4
-            self.goal_flash_duration = 2.4
-            self.goal_flash_text = f"GOAL! {atk.name}"
-            self.goal_flash_color = atk.color
-            self.reset_for_kickoff()
-            self.place_ball_center()
-            self.release_player = None
-            self.release_timer = 0.0
             self.add_commentary(f"GOAL! {shooter.name} scores for {atk.name}")
         else:
             if random.random()< (0.55 if not finesse else 0.35):
                 self.poss=dfn; self.holder=gk; self.gk_hands=True; self.gk_hold_timer=0.0
                 self.bvx=self.bvy=self.bvz=0.0; self.phase_reset=False  # save does NOT reset
                 self.pass_target=None
-                self.release_player=None
-                self.release_timer=0.0
                 self.add_commentary(f"{gk.name} makes the save")
             else:
                 self.poss=dfn; self.holder=None; self.gk_hands=False
@@ -647,8 +597,6 @@ class Match:
                 self.ball[2]=0.0; self.bvx=random.uniform(-120,120); self.bvy=random.uniform(-100,100); self.bvz=0.0
                 # same offside phase (save)
                 self.pass_target=None
-                self.release_player=None
-                self.release_timer=0.0
                 self.add_commentary(f"{shooter.name}'s shot is off target")
 
     # ---------- interceptions ----------
@@ -787,8 +735,6 @@ class Match:
         if not (x<left or x>right or y<top or y>bottom): return
         self.bvx=self.bvy=self.bvz=0.0; self.holder=None; self.deadball_timer=STOPPAGE_PAUSE
         self.pass_target=None
-        self.release_player=None
-        self.release_timer=0.0
         atk=self.last_touch_team or self.poss; dfn=self.A if atk is self.H else self.H
         midy=self.pr.y+self.pr.h/2
         if x<left or x>right:
@@ -862,7 +808,6 @@ class Match:
         holder = self.holder
 
         mates = [m for m in atk.players if m.on_pitch and m is not holder]
-        lateral_relief = False
 
         def pass_score(m):
             dx, dy = m.x - holder.x, m.y - holder.y
@@ -899,14 +844,8 @@ class Match:
         if mates:
             scored = [(pass_score(m), m) for m in mates]
             best_score, cand = max(scored, key=lambda t: t[0])
-            goal_x = self.pr.right - 18 if atk is self.H else self.pr.x + 18
-            goal_y = self.pr.y + self.pr.h / 2
-            dist_goal = math.hypot(holder.x - goal_x, holder.y - goal_y)
-            base_appetite = 0.28 + holder.pas / 160.0 + atk.pass_skill() / 360.0
-            if dist_goal < 150:
-                base_appetite -= 0.08
-            pass_appetite = clamp(base_appetite, 0.25, 0.85)
-            lateral_relief = best_score > 6.0 or (best_score > -4.0 and random.random() < pass_appetite)
+            pass_appetite = clamp(0.28 + holder.pas / 160.0 + atk.pass_skill() / 360.0, 0.3, 0.9)
+            lateral_relief = best_score > 6.0 or (best_score > -8.0 and random.random() < pass_appetite)
             if lateral_relief and not self.is_offside(atk, cand):
                 ptype = "ground"
                 flank_zone = abs(cand.y - (self.pr.y + self.pr.h / 2)) > self.pr.h * 0.22
@@ -919,19 +858,10 @@ class Match:
                 took_action = True
 
         if not took_action:
-            score_diff = (self.H.goals - self.A.goals) if atk is self.H else (self.A.goals - self.H.goals)
-            losing = score_diff < 0
-            shoot_bias = 0.18 + holder.atk / 250.0 + (atk.atk_rating() - dfn.dfn_rating()) / 320.0
-            if losing:
-                shoot_bias += 0.14
-            else:
-                shoot_bias -= 0.05
-            if atk is self.A:
-                shoot_bias += 0.05
-            if self.minute >= 70:
-                shoot_bias += 0.04
-            if self.minute <= 20 and score_diff > 0:
-                shoot_bias -= 0.05
+            # consider shot late or in range
+            losing = ((atk is self.H and self.H.goals < self.A.goals) or
+                      (atk is self.A and self.A.goals < self.H.goals))
+            shoot_bias = {"defensive": 0.09, "balanced": 0.16, "press": 0.22, "attacking": 0.28}[atk.tactic]
             if losing and self.minute >= 85:
                 shoot_bias += 0.10
             if (not losing) and self.minute >= 85:
@@ -940,55 +870,43 @@ class Match:
             gy = self.pr.y + self.pr.h / 2
             dist_goal = math.hypot(holder.x - gx, holder.y - gy)
             in_good_area = dist_goal < 170 or (dist_goal < 210 and random.random() < 0.5)
-            if shoot_bias > 0.32 and dist_goal < 170:
-                lateral_relief = False
-            if in_good_area and random.random() < max(0.07, shoot_bias):
+            if in_good_area and random.random() < max(0.05, shoot_bias):
                 self.try_shot(atk, dfn, holder)
 
         # else keep carrying; tackles may happen in frame_update
 
     # ---------- per-frame movement/physics ----------
     def frame_update(self, dt):
-        in_stoppage = bool(self.restart is not None and self.deadball_timer > 0.0)
-        self.in_stoppage = in_stoppage
-
         if not self.pr:
             return
-
-        self.release_timer = max(0.0, self.release_timer - dt)
-        if getattr(self, "goal_flash_timer", 0.0) > 0.0:
-            self.goal_flash_timer = max(0.0, self.goal_flash_timer - dt)
 
         # --- team shape steering ---
         directives = {}
         ball_point = (self.ball[0], self.ball[1])
-        if not in_stoppage:
-            if self.holder:
-                poss_team = self.H if self.holder in self.H.players else self.A
-                defend_team = self.A if poss_team is self.H else self.H
-                target_point = (self.holder.x, self.holder.y)
-                defenders = [p for p in defend_team.players if p.on_pitch and not p.injured and not p.red]
-                defenders = sorted(defenders, key=lambda p: (p.x-target_point[0])**2 + (p.y-target_point[1])**2)[:2]
-                for d in defenders:
-                    directives[d] = target_point
-                if self.pass_target and self.pass_target.on_pitch:
-                    run_x = self.ball[0] + self.bvx * 0.25
-                    run_y = self.ball[1] + self.bvy * 0.25
-                    directives[self.pass_target] = (run_x, run_y)
-                support = [p for p in poss_team.players if p.on_pitch and p is not self.holder and p is not self.pass_target]
-                support = sorted(support, key=lambda p: (p.x-target_point[0])**2 + (p.y-target_point[1])**2)[:2]
-                for s in support:
-                    sx = 0.7 * target_point[0] + 0.3 * self.ball[0]
-                    sy = 0.7 * target_point[1] + 0.3 * self.ball[1] + random.uniform(-6, 6)
-                    directives.setdefault(s, (sx, sy))
-            else:
-                for team in (self.H, self.A):
-                    chasers = [p for p in team.players if p.on_pitch and not p.injured and not p.red]
-                    chasers = sorted(chasers, key=lambda p: (p.x-ball_point[0])**2 + (p.y-ball_point[1])**2)[:2]
-                    for c in chasers:
-                        directives[c] = ball_point
-        elif self.holder and not self.gk_hands:
-            directives[self.holder] = (self.holder.x, self.holder.y)
+        if self.holder:
+            poss_team = self.H if self.holder in self.H.players else self.A
+            defend_team = self.A if poss_team is self.H else self.H
+            target_point = (self.holder.x, self.holder.y)
+            defenders = [p for p in defend_team.players if p.on_pitch and not p.injured and not p.red]
+            defenders = sorted(defenders, key=lambda p: (p.x-target_point[0])**2 + (p.y-target_point[1])**2)[:2]
+            for d in defenders:
+                directives[d] = target_point
+            if self.pass_target and self.pass_target.on_pitch:
+                run_x = self.ball[0] + self.bvx * 0.25
+                run_y = self.ball[1] + self.bvy * 0.25
+                directives[self.pass_target] = (run_x, run_y)
+            support = [p for p in poss_team.players if p.on_pitch and p is not self.holder and p is not self.pass_target]
+            support = sorted(support, key=lambda p: (p.x-target_point[0])**2 + (p.y-target_point[1])**2)[:2]
+            for s in support:
+                sx = 0.7 * target_point[0] + 0.3 * self.ball[0]
+                sy = 0.7 * target_point[1] + 0.3 * self.ball[1] + random.uniform(-6, 6)
+                directives.setdefault(s, (sx, sy))
+        else:
+            for team in (self.H, self.A):
+                chasers = [p for p in team.players if p.on_pitch and not p.injured and not p.red]
+                chasers = sorted(chasers, key=lambda p: (p.x-ball_point[0])**2 + (p.y-ball_point[1])**2)[:2]
+                for c in chasers:
+                    directives[c] = ball_point
 
         def side(team: Team, left_to_right: bool):
             form_fn = anchors_for(team.formation, left_to_right)
@@ -1248,6 +1166,80 @@ def draw_teams(screen, match: 'Match', font, small_font):
         overlay.fill((goal_flash_color[0], goal_flash_color[1], goal_flash_color[2], alpha))
         screen.blit(overlay, (0, 0))
         banner = font.render(goal_flash_text, True, (255, 255, 255))
+        screen.blit(
+            banner,
+            (screen.get_width() // 2 - banner.get_width() // 2,
+             screen.get_height() // 2 - banner.get_height() // 2)
+        )
+
+    goal_flash_timer = getattr(match, "goal_flash_timer", 0.0)
+    goal_flash_duration = getattr(match, "goal_flash_duration", 0.0)
+    goal_flash_text = getattr(match, "goal_flash_text", "")
+    goal_flash_color = getattr(match, "goal_flash_color", (255, 255, 255))
+
+    if goal_flash_timer > 0.0 and goal_flash_duration > 0.0 and goal_flash_text:
+        fade = goal_flash_timer / goal_flash_duration
+        overlay = pygame.Surface(screen.get_size(), pygame.SRCALPHA)
+        alpha = int(140 * min(1.0, fade))
+        overlay.fill((goal_flash_color[0], goal_flash_color[1], goal_flash_color[2], alpha))
+        screen.blit(overlay, (0, 0))
+        banner = font.render(goal_flash_text, True, (255, 255, 255))
+        screen.blit(
+            banner,
+            (screen.get_width() // 2 - banner.get_width() // 2,
+             screen.get_height() // 2 - banner.get_height() // 2)
+        )
+
+    if match.goal_flash_timer > 0.0 and match.goal_flash_duration > 0.0 and match.goal_flash_text:
+        fade = match.goal_flash_timer / match.goal_flash_duration
+        overlay = pygame.Surface(screen.get_size(), pygame.SRCALPHA)
+        alpha = int(140 * min(1.0, fade))
+        color = match.goal_flash_color
+        overlay.fill((color[0], color[1], color[2], alpha))
+        screen.blit(overlay, (0, 0))
+        banner = font.render(match.goal_flash_text, True, (255, 255, 255))
+        screen.blit(
+            banner,
+            (screen.get_width() // 2 - banner.get_width() // 2,
+             screen.get_height() // 2 - banner.get_height() // 2)
+        )
+
+    if match.goal_flash_timer > 0.0 and match.goal_flash_duration > 0.0 and match.goal_flash_text:
+        fade = match.goal_flash_timer / match.goal_flash_duration
+        overlay = pygame.Surface(screen.get_size(), pygame.SRCALPHA)
+        alpha = int(140 * min(1.0, fade))
+        color = match.goal_flash_color
+        overlay.fill((color[0], color[1], color[2], alpha))
+        screen.blit(overlay, (0, 0))
+        banner = font.render(match.goal_flash_text, True, (255, 255, 255))
+        screen.blit(
+            banner,
+            (screen.get_width() // 2 - banner.get_width() // 2,
+             screen.get_height() // 2 - banner.get_height() // 2)
+        )
+
+    if match.goal_flash_timer > 0.0 and match.goal_flash_duration > 0.0 and match.goal_flash_text:
+        fade = match.goal_flash_timer / match.goal_flash_duration
+        overlay = pygame.Surface(screen.get_size(), pygame.SRCALPHA)
+        alpha = int(140 * min(1.0, fade))
+        color = match.goal_flash_color
+        overlay.fill((color[0], color[1], color[2], alpha))
+        screen.blit(overlay, (0, 0))
+        banner = font.render(match.goal_flash_text, True, (255, 255, 255))
+        screen.blit(
+            banner,
+            (screen.get_width() // 2 - banner.get_width() // 2,
+             screen.get_height() // 2 - banner.get_height() // 2)
+        )
+
+    if match.goal_flash_timer > 0.0 and match.goal_flash_duration > 0.0 and match.goal_flash_text:
+        fade = match.goal_flash_timer / match.goal_flash_duration
+        overlay = pygame.Surface(screen.get_size(), pygame.SRCALPHA)
+        alpha = int(140 * min(1.0, fade))
+        color = match.goal_flash_color
+        overlay.fill((color[0], color[1], color[2], alpha))
+        screen.blit(overlay, (0, 0))
+        banner = font.render(match.goal_flash_text, True, (255, 255, 255))
         screen.blit(
             banner,
             (screen.get_width() // 2 - banner.get_width() // 2,
