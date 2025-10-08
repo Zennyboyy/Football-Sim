@@ -11,7 +11,7 @@
 # - time-wasting & gamble heuristics; HUD with speed controls
 
 import math, random, time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import List, Tuple, Optional
 import pygame
 
@@ -79,6 +79,7 @@ class Team:
     players: List[Player]; subs: List[Player]
     tactic: str="balanced"; formation: str="4-3-3"; manager: str="Manager"
     goals:int=0; shots:int=0; shots_on:int=0; xg:float=0.0; yellows:int=0; reds:int=0
+    benched: List[Player] = field(default_factory=list)
 
     def gk(self):
         for p in self.players:
@@ -125,6 +126,10 @@ class Team:
         off.on_pitch = False
         if sub in self.subs:
             self.subs.remove(sub)
+        if sub in self.benched:
+            self.benched.remove(sub)
+        if off not in self.benched:
+            self.benched.append(off)
         return True
 
 # =================== Formations & anchors ===================
@@ -245,8 +250,21 @@ class Match:
         self.fouls_log = {}
         self.last_pass = {"team":None, "passer":None, "receiver":None, "type":"ground"}
         self.injuries_to_process: List[Player]=[]
+        self.pass_target: Optional[Player] = None
+        self.commentary: List[str] = []
+        self.commentary_limit = 6
+        self.referee = {"x": 0.0, "y": 0.0, "vx": 0.0, "vy": 0.0}
+        self.manager_positions = {}
+        self.bench_spots = {}
 
     # ---------- helpers ----------
+    def add_commentary(self, text: str):
+        stamp = f"{self.minute:02d}'"
+        entry = f"{stamp} {text}"
+        self.commentary.append(entry)
+        if len(self.commentary) > self.commentary_limit:
+            self.commentary = self.commentary[-self.commentary_limit:]
+
     def m2p(self, xm, ym):
         x = self.pr.x + (xm/PITCH_LEN_M)*self.pr.w
         y = self.pr.y + (ym/PITCH_WID_M)*self.pr.h
@@ -262,6 +280,27 @@ class Match:
         self.holder = min((self.H.players if self.poss is self.H else self.A.players),
                           key=lambda p: (p.x-self.ball[0])**2+(p.y-self.ball[1])**2)
         self.gk_hands=False; self.gk_hold_timer=0.0
+        # sideline setup
+        self.manager_positions = {
+            self.H: (self.pr.x - 50, self.pr.y + self.pr.h * 0.35),
+            self.A: (self.pr.right + 50, self.pr.y + self.pr.h * 0.65),
+        }
+
+        def bench_slots(team: Team, left: bool):
+            base_x = self.pr.x - 70 if left else self.pr.right + 70
+            start_y = self.pr.y + 90
+            step = 28
+            return [(base_x, start_y + i * step) for i in range(12)]
+
+        self.bench_spots = {
+            self.H: bench_slots(self.H, True),
+            self.A: bench_slots(self.A, False)
+        }
+
+        self.update_bench_positions()
+        self.referee["x"], self.referee["y"] = self.ball[0], self.ball[1]
+        self.referee["vx"] = self.referee["vy"] = 0.0
+        self.add_commentary(f"Kick-off: {self.poss.name} get us underway")
 
     def place_ball_center(self):
         self.ball[0]=self.pr.x+self.pr.w/2; self.ball[1]=self.pr.y+self.pr.h/2; self.ball[2]=0.0
@@ -273,6 +312,18 @@ class Match:
 
     def keeper(self, team:Team):  return team.gk()
 
+    def update_bench_positions(self):
+        if not self.pr:
+            return
+        for team, _ in ((self.H, True), (self.A, False)):
+            spots = self.bench_spots.get(team, [])
+            benchers = [p for p in team.subs if not p.on_pitch]
+            benchers += [p for p in team.benched if not p.on_pitch]
+            for idx, player in enumerate(benchers):
+                if idx < len(spots):
+                    player.x, player.y = spots[idx]
+                    player.vx = player.vy = 0.0
+
     # ---------- possession changes ----------
     def on_kick(self, team:Team, passer:Player, ptype="ground"):
         self.last_touch_team=team; self.last_touch_player=passer
@@ -280,6 +331,7 @@ class Match:
         self.holder=None
         # passing begins new offside phase
         self.phase_reset=False
+        self.pass_target=None
 
     def capture_free_ball(self):
         if self.holder is not None or self.restart: return
@@ -296,6 +348,11 @@ class Match:
                 self.gk_hands=True; self.gk_hold_timer=0.0
             else:
                 self.gk_hands=False
+            if self.pass_target is taker:
+                self.add_commentary(f"{taker.name} brings the pass under control")
+            elif self.last_touch_team and taker not in self.last_touch_team.players:
+                self.add_commentary(f"{taker.name} steals the loose ball")
+            self.pass_target=None
             # back-pass violation (only if hands used on deliberate ground pass)
             if taker is self.keeper(self.poss) and self.last_pass["team"] is self.poss and self.last_pass["type"]=="ground":
                 if self.gk_hands:
@@ -325,19 +382,25 @@ class Match:
             give_yellow=True
         if give_red:
             offender.red=True; offender.on_pitch=False; dfn.reds+=1
+            self.add_commentary(f"Red card! {offender.name} is sent off")
         elif give_yellow and not offender.yellow:
             offender.yellow=True; dfn.yellows+=1
+            self.add_commentary(f"Yellow card for {offender.name}")
         self.direct_free_kick(atk, spotx, spoty)
 
     def direct_free_kick(self, team:Team, x, y):
         self.bvx=self.bvy=self.bvz=0.0; self.holder=None
         self.restart=('dfk', x, y, team); self.deadball_timer=0.9
         self.gk_hands=False
+        self.pass_target=None
+        self.add_commentary(f"Direct free-kick for {team.name}")
 
     def indirect_free_kick(self, team:Team, x, y, reason="IFK"):
         self.bvx=self.bvy=self.bvz=0.0; self.holder=None
         self.restart=('ifk', x, y, team, reason); self.deadball_timer=0.9
         self.gk_hands=False
+        self.pass_target=None
+        self.add_commentary(f"Indirect free-kick for {team.name} ({reason})")
 
     # ---------- keeper behaviours ----------
     def keeper_positioning(self, team:Team, left_to_right:bool, dt):
@@ -373,6 +436,8 @@ class Match:
                 self.bvx=self.bvy=self.bvz=0.0
                 self.gk_hands=True; self.gk_hold_timer=0.0
                 self.phase_reset=True  # keeper control is a new phase
+                self.pass_target=None
+                self.add_commentary(f"{gk.name} sweeps up the danger")
 
     def keeper_distribute(self, team:Team):
         gk=self.keeper(team)
@@ -389,6 +454,7 @@ class Match:
             target=min(backs or mates, key=lambda m:(m.x-gk.x)**2+(m.y-gk.y)**2)
             self.pass_to(team, gk, target, power=220, ptype="ground")
         self.gk_hands=False; self.gk_hold_timer=0.0
+        self.add_commentary(f"{gk.name} distributes for {team.name}")
 
     # ---------- passing/shooting ----------
     def pass_to(self, team:Team, passer:Player, target:Player, power=320, ptype="ground"):
@@ -396,6 +462,8 @@ class Match:
             self.indirect_free_kick(self.A if team is self.H else self.H, self.ball[0], self.ball[1], reason="Offside")
             return
         self.on_kick(team, passer, ptype)
+        if isinstance(target, Player) and target in team.players and target.on_pitch:
+            self.pass_target = target
         ang=math.atan2(target.y-self.ball[1], target.x-self.ball[0])
         if ptype in ("chip","cross"):
             self.bvx, self.bvy = math.cos(ang)*power, math.sin(ang)*power
@@ -405,6 +473,9 @@ class Match:
             self.bvx, self.bvy = math.cos(ang)*power, math.sin(ang)*power
             self.bvz = 0.0
         self.last_pass["receiver"]=target
+        if isinstance(target, Player) and target in team.players:
+            desc = "chip" if ptype == "chip" else ("cross" if ptype == "cross" else "pass")
+            self.add_commentary(f"{passer.name} plays a {desc} to {target.name}")
 
     def try_shot(self, atk:Team, dfn:Team, shooter:Player):
         gx = self.pr.right-18 if atk is self.H else self.pr.x+18
@@ -434,15 +505,21 @@ class Match:
             self.bvx=self.bvy=self.bvz=0.0
             self.restart=('kickoff', self.pr.x+self.pr.w/2, self.pr.y+self.pr.h/2, dfn); self.deadball_timer=1.2
             self.holder=None; self.gk_hands=False
+            self.pass_target=None
+            self.add_commentary(f"GOAL! {shooter.name} scores for {atk.name}")
         else:
             if random.random()< (0.55 if not finesse else 0.35):
                 self.poss=dfn; self.holder=gk; self.gk_hands=True; self.gk_hold_timer=0.0
                 self.bvx=self.bvy=self.bvz=0.0; self.phase_reset=False  # save does NOT reset
+                self.pass_target=None
+                self.add_commentary(f"{gk.name} makes the save")
             else:
                 self.poss=dfn; self.holder=None; self.gk_hands=False
                 self.ball[0], self.ball[1] = gk.x + random.uniform(-40,40), gk.y + random.uniform(-30,30)
                 self.ball[2]=0.0; self.bvx=random.uniform(-120,120); self.bvy=random.uniform(-100,100); self.bvz=0.0
                 # same offside phase (save)
+                self.pass_target=None
+                self.add_commentary(f"{shooter.name}'s shot is off target")
 
     # ---------- interceptions ----------
     def try_interception(self, atk:Team, dfn:Team):
@@ -459,6 +536,8 @@ class Match:
             if math.hypot(px-d.x, py-d.y) <= max(18.0, max_speed*t)+6:
                 self.poss=dfn; self.holder=d; self.ball[0],self.ball[1]=px,py; self.bvx=self.bvy=self.bvz=0.0
                 self.phase_reset=True
+                self.pass_target=None
+                self.add_commentary(f"{d.name} steps in to intercept")
                 return
 
     # ---------- duels/tackles (immediate foul) ----------
@@ -476,12 +555,17 @@ class Match:
             foul_chance = FOUL_BASE_RATE * (1.1 - defd.dis/120.0) * (1.0 + 0.15*(1 if self.minute>=70 else 0))
             if duel > 5:
                 self.poss=dfn; self.holder=defd; self.bvx=self.bvy=self.bvz=0.0; self.phase_reset=True
+                self.pass_target=None
+                self.add_commentary(f"{defd.name} wins it off {holder.name}")
             else:
                 if random.random() < foul_chance:
                     self.holder=None
                     self.whistle_foul(atk, dfn, holder.x, holder.y, defd)
+                    self.add_commentary(f"Foul by {defd.name} on {holder.name}")
                 else:
                     self.holder=None; self.bvx=self.bvy=self.bvz=0.0
+                    self.pass_target=None
+                    self.add_commentary(f"Loose ball after the challenge between {holder.name} and {defd.name}")
             if duel < -10 and random.random()<0.22:
                 holder.injured=True; holder.injury_timer=30.0; self.injuries_to_process.append(holder)
 
@@ -557,6 +641,7 @@ class Match:
         left,right,top,bottom=self.pr.x,self.pr.right,self.pr.y,self.pr.bottom
         if not (x<left or x>right or y<top or y>bottom): return
         self.bvx=self.bvy=self.bvz=0.0; self.holder=None; self.deadball_timer=0.9
+        self.pass_target=None
         atk=self.last_touch_team or self.poss; dfn=self.A if atk is self.H else self.H
         midy=self.pr.y+self.pr.h/2
         if x<left or x>right:
@@ -566,14 +651,17 @@ class Match:
                 cy = top if y < midy else bottom
                 self.ball[0]=cx+(12 if x<left else -12); self.ball[1]=cy+(-12 if y<midy else 12)
                 self.restart=('corner', self.ball[0], self.ball[1], atk)
+                self.add_commentary(f"Corner kick for {atk.name}")
             else:
                 gx = left+32 if x<left else right-32
                 gy = midy
                 self.ball[0],self.ball[1]=gx,gy; self.restart=('goalkick', gx, gy, dfn)
+                self.add_commentary(f"Goal kick for {dfn.name}")
         else:
             team = dfn if self.last_touch_team is atk else atk
             tx=clamp(x,left+20,right-20); ty=top+18 if y<top else bottom-18
             self.ball[0],self.ball[1]=tx,ty; self.restart=('throw', tx, ty, team)
+            self.add_commentary(f"Throw-in to {team.name}")
     # ---------- one match-minute brain tick ----------
     def step_minute(self):
         # stoppage time rolls
@@ -659,8 +747,9 @@ class Match:
 
         took_action = False
         if mates:
-            cand = max(mates, key=pass_score)
-            if pass_score(cand) > 5 and not self.is_offside(atk, cand):
+            scored = [(pass_score(m), m) for m in mates]
+            best_score, cand = max(scored, key=lambda t: t[0])
+            if best_score > -1.0 and not self.is_offside(atk, cand):
                 ptype = "chip" if (cand.role in ("winger", "target") and random.random() < 0.35) else "ground"
                 self.pass_to(atk, holder, cand, power=320 + random.uniform(-30, 30), ptype=ptype)
                 took_action = True
@@ -687,6 +776,33 @@ class Match:
             return
 
         # --- team shape steering ---
+        directives = {}
+        ball_point = (self.ball[0], self.ball[1])
+        if self.holder:
+            poss_team = self.H if self.holder in self.H.players else self.A
+            defend_team = self.A if poss_team is self.H else self.H
+            target_point = (self.holder.x, self.holder.y)
+            defenders = [p for p in defend_team.players if p.on_pitch and not p.injured and not p.red]
+            defenders = sorted(defenders, key=lambda p: (p.x-target_point[0])**2 + (p.y-target_point[1])**2)[:3]
+            for d in defenders:
+                directives[d] = target_point
+            if self.pass_target and self.pass_target.on_pitch:
+                run_x = self.ball[0] + self.bvx * 0.25
+                run_y = self.ball[1] + self.bvy * 0.25
+                directives[self.pass_target] = (run_x, run_y)
+            support = [p for p in poss_team.players if p.on_pitch and p is not self.holder and p is not self.pass_target]
+            support = sorted(support, key=lambda p: (p.x-target_point[0])**2 + (p.y-target_point[1])**2)[:2]
+            for s in support:
+                sx = 0.7 * target_point[0] + 0.3 * self.ball[0]
+                sy = 0.7 * target_point[1] + 0.3 * self.ball[1] + random.uniform(-6, 6)
+                directives.setdefault(s, (sx, sy))
+        else:
+            for team in (self.H, self.A):
+                chasers = [p for p in team.players if p.on_pitch and not p.injured and not p.red]
+                chasers = sorted(chasers, key=lambda p: (p.x-ball_point[0])**2 + (p.y-ball_point[1])**2)[:3]
+                for c in chasers:
+                    directives[c] = ball_point
+
         def side(team: Team, left_to_right: bool):
             form_fn = anchors_for(team.formation, left_to_right)
             return [self.m2p(*xy) for xy in form_fn]
@@ -694,11 +810,13 @@ class Match:
         anchors_H = side(self.H, True)
         anchors_A = side(self.A, False)
 
-        def steer(team: Team, anchors, dt_local):
+        def steer(team: Team, anchors, dt_local, orders):
             for i, p in enumerate(team.players):
                 if not p.on_pitch or p.injured or p.red:
                     continue
-                if p is self.holder and not self.gk_hands:
+                if p in orders:
+                    tx, ty = orders[p]
+                elif p is self.holder and not self.gk_hands:
                     # slight goal-biased carry
                     goal_x = self.pr.right - 18 if team is self.H else self.pr.x + 18
                     tx = 0.65 * goal_x + 0.35 * p.x
@@ -718,8 +836,8 @@ class Match:
                 p.x += p.vx
                 p.y += p.vy
 
-        steer(self.H, anchors_H, dt)
-        steer(self.A, anchors_A, dt)
+        steer(self.H, anchors_H, dt, directives)
+        steer(self.A, anchors_A, dt, directives)
 
         # --- keeper behaviours ---
         self.keeper_positioning(self.H, True, dt)
@@ -743,6 +861,19 @@ class Match:
                     a.y -= ny * (overlap * 0.5)
                     b.x += nx * (overlap * 0.5)
                     b.y += ny * (overlap * 0.5)
+
+        self.update_bench_positions()
+
+        # --- referee trailing play ---
+        ref_speed = 120.0 * dt
+        rx, ry = self.referee["x"], self.referee["y"]
+        tx = clamp(self.ball[0], self.pr.x + 20, self.pr.right - 20)
+        ty = clamp(self.ball[1], self.pr.y + 20, self.pr.bottom - 20)
+        dx, dy = tx - rx, ty - ry
+        dist = math.hypot(dx, dy)
+        if dist > 1e-3:
+            self.referee["x"] += (dx / dist) * ref_speed
+            self.referee["y"] += (dy / dist) * ref_speed
 
         # --- ball physics ---
         if self.holder is not None:
@@ -830,7 +961,7 @@ def draw_pitch(surf, rect):
     box("R")
 
 
-def draw_teams(screen, match: 'Match', font):
+def draw_teams(screen, match: 'Match', font, small_font):
     def draw_player(p: 'Player', color):
         r = 9 if p.pos != "GK" else 11
         # outline
@@ -853,12 +984,37 @@ def draw_teams(screen, match: 'Match', font):
         if p.on_pitch:
             draw_player(p, match.A.color)
 
+    # referee
+    pygame.draw.circle(screen, (250, 200, 40), (int(match.referee["x"]), int(match.referee["y"])), 8)
+
+    def draw_bench(team: Team, color):
+        benchers = [p for p in team.subs if not p.on_pitch]
+        benchers += [p for p in team.benched if not p.on_pitch]
+        for p in benchers:
+            pygame.draw.circle(screen, (0, 0, 0), (int(p.x), int(p.y)), 7)
+            pygame.draw.circle(screen, color, (int(p.x), int(p.y)), 6)
+            num = small_font.render(str(p.number), True, (255, 255, 255))
+            screen.blit(num, (p.x - num.get_width() // 2, p.y - num.get_height() // 2))
+
+    draw_bench(match.H, match.H.alt)
+    draw_bench(match.A, match.A.alt)
+
+    # managers
+    for team in (match.H, match.A):
+        if team in match.manager_positions:
+            mx, my = match.manager_positions[team]
+            rect = pygame.Rect(0, 0, 36, 24)
+            rect.center = (int(mx), int(my))
+            pygame.draw.rect(screen, (70, 70, 70), rect)
+            label = small_font.render(team.manager, True, (255, 255, 255))
+            screen.blit(label, (rect.centerx - label.get_width() // 2, rect.bottom + 4))
+
     # ball (z lifts it slightly)
     x, y, z = match.ball
     pygame.draw.circle(screen, (250, 250, 250), (int(x), int(y - z * 0.25)), 5)
 
 
-def draw_hud(screen, match: 'Match', font, speed_idx):
+def draw_hud(screen, match: 'Match', font, speed_idx, small_font):
     y0 = 8
     score = f"{match.H.name} {match.H.goals} - {match.A.goals} {match.A.name}"
     tstr = f"{match.minute:02d}'  H{match.half} +{match.stoppage}"
@@ -870,6 +1026,16 @@ def draw_hud(screen, match: 'Match', font, speed_idx):
         lab = font.render(match.var_text, True, (255, 240, 120))
         screen.blit(lab, (screen.get_width() // 2 - lab.get_width() // 2, y0))
 
+    # commentary box
+    box_h = 140
+    box_rect = pygame.Rect(10, screen.get_height() - box_h - 10, screen.get_width() - 20, box_h)
+    pygame.draw.rect(screen, (16, 60, 16), box_rect)
+    pygame.draw.rect(screen, (220, 220, 220), box_rect, 2)
+    lines = list(reversed(match.commentary[-match.commentary_limit:]))
+    for i, line in enumerate(lines):
+        text = small_font.render(line, True, (245, 245, 245))
+        screen.blit(text, (box_rect.x + 10, box_rect.y + 10 + i * small_font.get_linesize()))
+
 
 def run_game():
     pygame.init()
@@ -878,6 +1044,7 @@ def run_game():
     pygame.display.set_caption("footy_pro_v6")
     clock = pygame.time.Clock()
     font = pygame.font.SysFont(None, 22)
+    small_font = pygame.font.SysFont(None, 18)
 
     # pitch rect (leave HUD space)
     margin = 40
@@ -934,11 +1101,13 @@ def run_game():
                 match.half = 2
                 match.minute = 45
                 match.stoppage = 0
+                match.add_commentary("Half-time whistle")
                 # second-half kickoff: give ball to the team that didn't start
                 match.poss = match.A if match.poss is match.H else match.H
                 match.restart = ('kickoff', pr.x + pr.w / 2, pr.y + pr.h / 2, match.poss)
                 match.deadball_timer = 1.2
             elif match.half == 2 and match.minute >= 90 + match.stoppage:
+                match.add_commentary("Full-time whistle")
                 running = False
             else:
                 match.step_minute()
@@ -946,8 +1115,8 @@ def run_game():
         # render
         screen.fill((12, 40, 12))
         draw_pitch(screen, pr)
-        draw_teams(screen, match, font)
-        draw_hud(screen, match, font, speed_idx)
+        draw_teams(screen, match, font, small_font)
+        draw_hud(screen, match, font, speed_idx, small_font)
         pygame.display.flip()
 
     pygame.quit()
