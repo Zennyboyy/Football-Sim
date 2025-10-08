@@ -60,6 +60,7 @@ class Player:
     foot: str="both"  # "left","right","both"
     fouls_committed: int=0
     injury_timer: float=0.0
+    used_sub: bool=False
 
     def o_atk(self):
         f = max(0.5, 1.0 - self.fatigue)
@@ -111,6 +112,27 @@ class Team:
         intensity={"defensive":0.9,"balanced":1.0,"attacking":1.06,"press":1.18}[self.tactic]
         for p in self.outfield():
             p.tick_fatigue(intensity)
+
+    def perform_substitution(self, off: Player, sub: Player) -> bool:
+        if sub not in self.subs or sub.on_pitch:
+            return False
+        try:
+            idx = self.players.index(off)
+        except ValueError:
+            return False
+
+        self.subs.remove(sub)
+        sub.on_pitch = True
+        sub.used_sub = True
+        sub.x, sub.y = off.x, off.y
+        sub.vx = sub.vy = 0.0
+        self.players[idx] = sub
+
+        off.on_pitch = False
+        off.vx = off.vy = 0.0
+        off.used_sub = True
+        self.subs.append(off)
+        return True
 
 # =================== Formations & anchors ===================
 def anchors_433(left=True):
@@ -184,17 +206,17 @@ class ManagerAI:
         # forced subs for injuries
         for p in injuries:
             if p.on_pitch and p.injured and self.subs_used<self.max_subs:
-                bench=[s for s in self.t.subs if not s.on_pitch and s.pos==p.pos]
+                bench=[s for s in self.t.subs if not s.on_pitch and not s.used_sub and s.pos==p.pos]
                 if bench:
                     sub=max(bench, key=lambda s:(s.sta+s.pac+s.pas))
-                    sub.on_pitch=True; sub.x,sub.y=p.x,p.y; p.on_pitch=False
-                    self.subs_used+=1
+                    if self.t.perform_substitution(p, sub):
+                        self.subs_used+=1
 
         # planned subs
         if self.subs_used<self.max_subs and minute>=58:
             tired=sorted([p for p in self.t.players if p.on_pitch and p.pos!="GK"],
                          key=lambda q:q.fatigue + (0.15 if q.yellow else 0), reverse=True)
-            bench=[s for s in self.t.subs if not s.on_pitch]
+            bench=[s for s in self.t.subs if not s.on_pitch and not s.used_sub]
             if tired and bench:
                 off=tired[0]
                 need_att=(diff<0 and minute>=65); need_def=(diff>0 and minute>=70)
@@ -203,8 +225,8 @@ class ManagerAI:
                 if need_att: pool=[s for s in bench if s.pos=="FW"] or pool
                 if need_def: pool=[s for s in bench if s.pos=="DF"] or pool
                 sub=max(pool, key=lambda s:(s.sta+s.pac+s.pas))
-                sub.on_pitch=True; sub.x,sub.y=off.x,off.y; off.on_pitch=False
-                self.subs_used+=1; self.last_min=minute
+                if self.t.perform_substitution(off, sub):
+                    self.subs_used+=1; self.last_min=minute
 def clamp(v,a,b): return max(a, min(b, v))
 
 class Match:
