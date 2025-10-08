@@ -75,7 +75,6 @@ class Player:
         self.fatigue = min(0.7, self.fatigue + max(0.0, drain))
 
 @dataclass
-@dataclass
 class Team:
     name: str; color: Tuple[int,int,int]; alt: Tuple[int,int,int]
     players: List[Player]; subs: List[Player]
@@ -118,59 +117,40 @@ class Team:
 
     def make_substitution(self, off: Player, sub: Player) -> bool:
         """Swap an on-pitch player for a bench option, keeping player list order."""
-        if off not in self.players or sub not in self.subs:
+        if off not in self.players:
             return False
-        idx = self.players.index(off)
-        self.players[idx] = sub
-        sub.on_pitch = True
-        sub.injured = False
-        sub.x, sub.y = off.x, off.y
-        sub.vx = sub.vy = 0.0
-        off.on_pitch = False
-        if sub in self.subs:
-            self.subs.remove(sub)
-        if sub in self.benched:
-            self.benched.remove(sub)
-        if off not in self.benched:
-            self.benched.append(off)
-        return True
-
-    def make_substitution(self, off: Player, sub: Player) -> bool:
-        """Swap an on-pitch player for a bench option, keeping player list order."""
-        if off not in self.players or sub not in self.subs:
-            return False
-        idx = self.players.index(off)
-        self.players[idx] = sub
-        sub.on_pitch = True
-        sub.injured = False
-        sub.x, sub.y = off.x, off.y
-        sub.vx = sub.vy = 0.0
-        off.on_pitch = False
-        if sub in self.subs:
-            self.subs.remove(sub)
-        if sub in self.benched:
-            self.benched.remove(sub)
-        if off not in self.benched:
-            self.benched.append(off)
-    def perform_substitution(self, off: Player, sub: Player) -> bool:
         if sub not in self.subs or sub.on_pitch:
             return False
+
         try:
             idx = self.players.index(off)
         except ValueError:
             return False
 
-        self.subs.remove(sub)
+        # remove the incoming player from any bench tracking collections
+        if sub in self.subs:
+            self.subs.remove(sub)
+        if sub in self.benched:
+            self.benched.remove(sub)
+
+        # activate the substitute
         sub.on_pitch = True
+        sub.injured = False
         sub.used_sub = True
         sub.x, sub.y = off.x, off.y
         sub.vx = sub.vy = 0.0
+
+        # place the substitute into the players list at the original index
         self.players[idx] = sub
 
+        # move the replaced player to the bench
         off.on_pitch = False
         off.vx = off.vy = 0.0
         off.used_sub = True
-        self.subs.append(off)
+        if off not in self.subs:
+            self.subs.append(off)
+        if off not in self.benched:
+            self.benched.append(off)
         return True
 
 # =================== Formations & anchors ===================
@@ -245,21 +225,19 @@ class ManagerAI:
         # forced subs for injuries
         for p in injuries:
             if p.on_pitch and p.injured and self.subs_used<self.max_subs:
-                bench=[s for s in self.t.subs if not s.on_pitch and s.pos==p.pos]
-                if bench:
-                    sub=max(bench, key=lambda s:(s.sta+s.pac+s.pas))
+                bench=[s for s in self.t.subs if not s.on_pitch and not s.used_sub]
+                # try to match position first
+                positional=[s for s in bench if s.pos==p.pos]
+                pool=positional or bench
+                if pool:
+                    sub=max(pool, key=lambda s:(s.sta+s.pac+s.pas))
                     if self.t.make_substitution(p, sub):
-                bench=[s for s in self.t.subs if not s.on_pitch and not s.used_sub and s.pos==p.pos]
-                if bench:
-                    sub=max(bench, key=lambda s:(s.sta+s.pac+s.pas))
-                    if self.t.perform_substitution(p, sub):
                         self.subs_used+=1
 
         # planned subs
         if self.subs_used<self.max_subs and minute>=58:
             tired=sorted([p for p in self.t.players if p.on_pitch and p.pos!="GK"],
                          key=lambda q:q.fatigue + (0.15 if q.yellow else 0), reverse=True)
-            bench=[s for s in self.t.subs if not s.on_pitch]
             bench=[s for s in self.t.subs if not s.on_pitch and not s.used_sub]
             if tired and bench:
                 off=tired[0]
@@ -270,7 +248,6 @@ class ManagerAI:
                 if need_def: pool=[s for s in bench if s.pos=="DF"] or pool
                 sub=max(pool, key=lambda s:(s.sta+s.pac+s.pas))
                 if self.t.make_substitution(off, sub):
-                if self.t.perform_substitution(off, sub):
                     self.subs_used+=1; self.last_min=minute
 def clamp(v,a,b): return max(a, min(b, v))
 
