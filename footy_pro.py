@@ -880,6 +880,8 @@ class Match:
         if not self.pr:
             return
 
+        in_stoppage = bool(self.restart) and self.deadball_timer > 0.0
+
         # --- team shape steering ---
         directives = {}
         ball_point = (self.ball[0], self.ball[1])
