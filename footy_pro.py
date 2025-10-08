@@ -314,8 +314,8 @@ class Match:
         self.gk_hands=False; self.gk_hold_timer=0.0
         # sideline setup
         self.manager_positions = {
-            self.H: (self.pr.x - 50, self.pr.y + self.pr.h * 0.35),
-            self.A: (self.pr.right + 50, self.pr.y + self.pr.h * 0.65),
+            id(self.H): (self.pr.x - 50, self.pr.y + self.pr.h * 0.35),
+            id(self.A): (self.pr.right + 50, self.pr.y + self.pr.h * 0.65),
         }
 
         def bench_slots(team: Team, left: bool):
@@ -325,8 +325,8 @@ class Match:
             return [(base_x, start_y + i * step) for i in range(12)]
 
         self.bench_spots = {
-            self.H: bench_slots(self.H, True),
-            self.A: bench_slots(self.A, False)
+            id(self.H): bench_slots(self.H, True),
+            id(self.A): bench_slots(self.A, False)
         }
 
         self.update_bench_positions()
@@ -348,7 +348,7 @@ class Match:
         if not self.pr:
             return
         for team, _ in ((self.H, True), (self.A, False)):
-            spots = self.bench_spots.get(team, [])
+            spots = self.bench_spots.get(id(team), [])
             benchers = [p for p in team.subs if not p.on_pitch]
             benchers += [p for p in team.benched if not p.on_pitch]
             for idx, player in enumerate(benchers):
@@ -360,7 +360,7 @@ class Match:
         if not self.pr:
             return
         for team, _ in ((self.H, True), (self.A, False)):
-            spots = self.bench_spots.get(team, [])
+            spots = self.bench_spots.get(id(team), [])
             benchers = [p for p in team.subs if not p.on_pitch]
             benchers += [p for p in team.benched if not p.on_pitch]
             for idx, player in enumerate(benchers):
@@ -1051,8 +1051,9 @@ def draw_teams(screen, match: 'Match', font, small_font):
 
     # managers
     for team in (match.H, match.A):
-        if team in match.manager_positions:
-            mx, my = match.manager_positions[team]
+        key = id(team)
+        if key in match.manager_positions:
+            mx, my = match.manager_positions[key]
             rect = pygame.Rect(0, 0, 36, 24)
             rect.center = (int(mx), int(my))
             pygame.draw.rect(screen, (70, 70, 70), rect)
