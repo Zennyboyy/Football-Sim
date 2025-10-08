@@ -10,9 +10,17 @@
 # - multi-formations (4-3-3, 4-2-3-1, 3-5-2), roles, chips/crosses (ball z), collisions
 # - time-wasting & gamble heuristics; HUD with speed controls
 
-import math, random, time
+import math, random, time, sys, importlib.util
 from dataclasses import dataclass, field
 from typing import List, Tuple, Optional
+
+if importlib.util.find_spec("pygame") is None:
+    sys.stderr.write(
+        "football simulator requires the optional dependency 'pygame'.\n"
+        "Install it with `pip install pygame` to launch the full experience.\n"
+    )
+    raise SystemExit(1)
+
 import pygame
 
 # =================== Pitch & physics ===================
@@ -50,7 +58,7 @@ COLLISION_RADIUS_PX = 20.0
 SIM_SPEEDS = [0.6, 1.05, 1.8]
 
 # =================== Models ===================
-@dataclass
+@dataclass(eq=False)
 class Player:
     name: str; pos: str; number: int
     atk: int; dfn: int; pas: int; pac: int; sta: int; dis: int; gk: int=1
@@ -74,8 +82,7 @@ class Player:
         drain = 0.006 * intensity * (100 - (0.6*self.sta + 0.4*self.pac)) / 100
         self.fatigue = min(0.7, self.fatigue + max(0.0, drain))
 
-@dataclass
-@dataclass
+@dataclass(eq=False)
 class Team:
     name: str; color: Tuple[int,int,int]; alt: Tuple[int,int,int]
     players: List[Player]; subs: List[Player]
@@ -118,59 +125,40 @@ class Team:
 
     def make_substitution(self, off: Player, sub: Player) -> bool:
         """Swap an on-pitch player for a bench option, keeping player list order."""
-        if off not in self.players or sub not in self.subs:
+        if off not in self.players:
             return False
-        idx = self.players.index(off)
-        self.players[idx] = sub
-        sub.on_pitch = True
-        sub.injured = False
-        sub.x, sub.y = off.x, off.y
-        sub.vx = sub.vy = 0.0
-        off.on_pitch = False
-        if sub in self.subs:
-            self.subs.remove(sub)
-        if sub in self.benched:
-            self.benched.remove(sub)
-        if off not in self.benched:
-            self.benched.append(off)
-        return True
-
-    def make_substitution(self, off: Player, sub: Player) -> bool:
-        """Swap an on-pitch player for a bench option, keeping player list order."""
-        if off not in self.players or sub not in self.subs:
-            return False
-        idx = self.players.index(off)
-        self.players[idx] = sub
-        sub.on_pitch = True
-        sub.injured = False
-        sub.x, sub.y = off.x, off.y
-        sub.vx = sub.vy = 0.0
-        off.on_pitch = False
-        if sub in self.subs:
-            self.subs.remove(sub)
-        if sub in self.benched:
-            self.benched.remove(sub)
-        if off not in self.benched:
-            self.benched.append(off)
-    def perform_substitution(self, off: Player, sub: Player) -> bool:
         if sub not in self.subs or sub.on_pitch:
             return False
+
         try:
             idx = self.players.index(off)
         except ValueError:
             return False
 
-        self.subs.remove(sub)
+        # remove the incoming player from any bench tracking collections
+        if sub in self.subs:
+            self.subs.remove(sub)
+        if sub in self.benched:
+            self.benched.remove(sub)
+
+        # activate the substitute
         sub.on_pitch = True
+        sub.injured = False
         sub.used_sub = True
         sub.x, sub.y = off.x, off.y
         sub.vx = sub.vy = 0.0
+
+        # place the substitute into the players list at the original index
         self.players[idx] = sub
 
+        # move the replaced player to the bench
         off.on_pitch = False
         off.vx = off.vy = 0.0
         off.used_sub = True
-        self.subs.append(off)
+        if off not in self.subs:
+            self.subs.append(off)
+        if off not in self.benched:
+            self.benched.append(off)
         return True
 
 # =================== Formations & anchors ===================
@@ -244,34 +232,48 @@ class ManagerAI:
 
         # forced subs for injuries
         for p in injuries:
-            if p.on_pitch and p.injured and self.subs_used<self.max_subs:
-                bench=[s for s in self.t.subs if not s.on_pitch and s.pos==p.pos]
-                if bench:
-                    sub=max(bench, key=lambda s:(s.sta+s.pac+s.pas))
-                    if self.t.make_substitution(p, sub):
-                bench=[s for s in self.t.subs if not s.on_pitch and not s.used_sub and s.pos==p.pos]
-                if bench:
-                    sub=max(bench, key=lambda s:(s.sta+s.pac+s.pas))
-                    if self.t.perform_substitution(p, sub):
-                        self.subs_used+=1
+            if p.on_pitch and p.injured and self.subs_used < self.max_subs:
+                bench = [s for s in self.t.subs if not s.on_pitch and not s.used_sub]
+                # try to match position first
+                positional = [s for s in bench if s.pos == p.pos]
+                pool = positional or bench
+                if not pool:
+                    continue
+                sub = max(pool, key=lambda s: (s.sta + s.pac + s.pas))
+                if self.t.make_substitution(p, sub):
+                    self.subs_used += 1
 
         # planned subs
-        if self.subs_used<self.max_subs and minute>=58:
-            tired=sorted([p for p in self.t.players if p.on_pitch and p.pos!="GK"],
-                         key=lambda q:q.fatigue + (0.15 if q.yellow else 0), reverse=True)
-            bench=[s for s in self.t.subs if not s.on_pitch]
-            bench=[s for s in self.t.subs if not s.on_pitch and not s.used_sub]
+        if self.subs_used < self.max_subs and minute >= 58:
+            tired = sorted(
+                [p for p in self.t.players if p.on_pitch and p.pos != "GK"],
+                key=lambda q: q.fatigue + (0.15 if q.yellow else 0),
+                reverse=True,
+            )
+            bench = [s for s in self.t.subs if not s.on_pitch and not s.used_sub]
             if tired and bench:
-                off=tired[0]
-                need_att=(diff<0 and minute>=65); need_def=(diff>0 and minute>=70)
-                def line(p): return p.pos if p.pos in ("DF","MF","FW") else "MF"
-                pool=[s for s in bench if line(s)==line(off)]
-                if need_att: pool=[s for s in bench if s.pos=="FW"] or pool
-                if need_def: pool=[s for s in bench if s.pos=="DF"] or pool
-                sub=max(pool, key=lambda s:(s.sta+s.pac+s.pas))
+                off = tired[0]
+                need_att = diff < 0 and minute >= 65
+                need_def = diff > 0 and minute >= 70
+
+                def line(p):
+                    return p.pos if p.pos in ("DF", "MF", "FW") else "MF"
+
+                pool = [s for s in bench if line(s) == line(off)]
+                if need_att:
+                    att_pool = [s for s in bench if s.pos == "FW"]
+                    if att_pool:
+                        pool = att_pool
+                if need_def:
+                    def_pool = [s for s in bench if s.pos == "DF"]
+                    if def_pool:
+                        pool = def_pool
+                if not pool:
+                    pool = bench
+                sub = max(pool, key=lambda s: (s.sta + s.pac + s.pas))
                 if self.t.make_substitution(off, sub):
-                if self.t.perform_substitution(off, sub):
-                    self.subs_used+=1; self.last_min=minute
+                    self.subs_used += 1
+                    self.last_min = minute
 def clamp(v,a,b): return max(a, min(b, v))
 
 class Match:
@@ -328,20 +330,32 @@ class Match:
                           key=lambda p: (p.x-self.ball[0])**2+(p.y-self.ball[1])**2)
         self.gk_hands=False; self.gk_hold_timer=0.0
         # sideline setup
+        outer_offset = max(24, min(max(self.pr.x - 12, 0), 48))
+        screen_width = self.pr.right + self.pr.x
+        left_margin = self.pr.x
+        right_margin = max(screen_width - self.pr.right, 0)
+        if left_margin >= 36:
+            home_lane = self.pr.x - min(outer_offset, left_margin - 12)
+        else:
+            home_lane = self.pr.x + 24
+        if right_margin >= 36:
+            away_lane = self.pr.right + min(outer_offset, right_margin - 12)
+        else:
+            away_lane = self.pr.right - 24
         self.manager_positions = {
-            self.H: (self.pr.x - 50, self.pr.y + self.pr.h * 0.35),
-            self.A: (self.pr.right + 50, self.pr.y + self.pr.h * 0.65),
+            id(self.H): (home_lane, self.pr.y + self.pr.h * 0.35),
+            id(self.A): (away_lane, self.pr.y + self.pr.h * 0.65),
         }
 
         def bench_slots(team: Team, left: bool):
-            base_x = self.pr.x - 70 if left else self.pr.right + 70
+            lane_x = home_lane if left else away_lane
             start_y = self.pr.y + 90
             step = 28
-            return [(base_x, start_y + i * step) for i in range(12)]
+            return [(lane_x, start_y + i * step) for i in range(12)]
 
         self.bench_spots = {
-            self.H: bench_slots(self.H, True),
-            self.A: bench_slots(self.A, False)
+            id(self.H): bench_slots(self.H, True),
+            id(self.A): bench_slots(self.A, False)
         }
 
         self.update_bench_positions()
@@ -362,20 +376,8 @@ class Match:
     def update_bench_positions(self):
         if not self.pr:
             return
-        for team, _ in ((self.H, True), (self.A, False)):
-            spots = self.bench_spots.get(team, [])
-            benchers = [p for p in team.subs if not p.on_pitch]
-            benchers += [p for p in team.benched if not p.on_pitch]
-            for idx, player in enumerate(benchers):
-                if idx < len(spots):
-                    player.x, player.y = spots[idx]
-                    player.vx = player.vy = 0.0
-
-    def update_bench_positions(self):
-        if not self.pr:
-            return
-        for team, _ in ((self.H, True), (self.A, False)):
-            spots = self.bench_spots.get(team, [])
+        for team in (self.H, self.A):
+            spots = self.bench_spots.get(id(team), [])
             benchers = [p for p in team.subs if not p.on_pitch]
             benchers += [p for p in team.benched if not p.on_pitch]
             for idx, player in enumerate(benchers):
@@ -1066,8 +1068,9 @@ def draw_teams(screen, match: 'Match', font, small_font):
 
     # managers
     for team in (match.H, match.A):
-        if team in match.manager_positions:
-            mx, my = match.manager_positions[team]
+        key = id(team)
+        if key in match.manager_positions:
+            mx, my = match.manager_positions[key]
             rect = pygame.Rect(0, 0, 36, 24)
             rect.center = (int(mx), int(my))
             pygame.draw.rect(screen, (70, 70, 70), rect)
