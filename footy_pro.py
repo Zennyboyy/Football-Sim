@@ -1154,6 +1154,24 @@ def draw_teams(screen, match: 'Match', font, small_font):
     x, y, z = match.ball
     pygame.draw.circle(screen, (250, 250, 250), (int(x), int(y - z * 0.25)), 5)
 
+    goal_flash_timer = getattr(match, "goal_flash_timer", 0.0)
+    goal_flash_duration = getattr(match, "goal_flash_duration", 0.0)
+    goal_flash_text = getattr(match, "goal_flash_text", "")
+    goal_flash_color = getattr(match, "goal_flash_color", (255, 255, 255))
+
+    if goal_flash_timer > 0.0 and goal_flash_duration > 0.0 and goal_flash_text:
+        fade = goal_flash_timer / goal_flash_duration
+        overlay = pygame.Surface(screen.get_size(), pygame.SRCALPHA)
+        alpha = int(140 * min(1.0, fade))
+        overlay.fill((goal_flash_color[0], goal_flash_color[1], goal_flash_color[2], alpha))
+        screen.blit(overlay, (0, 0))
+        banner = font.render(goal_flash_text, True, (255, 255, 255))
+        screen.blit(
+            banner,
+            (screen.get_width() // 2 - banner.get_width() // 2,
+             screen.get_height() // 2 - banner.get_height() // 2)
+        )
+
     if match.goal_flash_timer > 0.0 and match.goal_flash_duration > 0.0 and match.goal_flash_text:
         fade = match.goal_flash_timer / match.goal_flash_duration
         overlay = pygame.Surface(screen.get_size(), pygame.SRCALPHA)
