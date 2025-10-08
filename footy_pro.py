@@ -1196,6 +1196,20 @@ def draw_teams(screen, match: 'Match', font, small_font):
              screen.get_height() // 2 - banner.get_height() // 2)
         )
 
+    if match.goal_flash_timer > 0.0 and match.goal_flash_duration > 0.0 and match.goal_flash_text:
+        fade = match.goal_flash_timer / match.goal_flash_duration
+        overlay = pygame.Surface(screen.get_size(), pygame.SRCALPHA)
+        alpha = int(140 * min(1.0, fade))
+        color = match.goal_flash_color
+        overlay.fill((color[0], color[1], color[2], alpha))
+        screen.blit(overlay, (0, 0))
+        banner = font.render(match.goal_flash_text, True, (255, 255, 255))
+        screen.blit(
+            banner,
+            (screen.get_width() // 2 - banner.get_width() // 2,
+             screen.get_height() // 2 - banner.get_height() // 2)
+        )
+
 
 def draw_hud(screen, match: 'Match', font, speed_idx, small_font):
     y0 = 8
