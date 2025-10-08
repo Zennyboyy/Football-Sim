@@ -10,9 +10,17 @@
 # - multi-formations (4-3-3, 4-2-3-1, 3-5-2), roles, chips/crosses (ball z), collisions
 # - time-wasting & gamble heuristics; HUD with speed controls
 
-import math, random, time
+import math, random, time, sys, importlib.util
 from dataclasses import dataclass, field
 from typing import List, Tuple, Optional
+
+if importlib.util.find_spec("pygame") is None:
+    sys.stderr.write(
+        "football simulator requires the optional dependency 'pygame'.\n"
+        "Install it with `pip install pygame` to launch the full experience.\n"
+    )
+    raise SystemExit(1)
+
 import pygame
 
 # =================== Pitch & physics ===================
