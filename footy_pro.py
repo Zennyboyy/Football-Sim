@@ -133,6 +133,25 @@ class Team:
             self.benched.remove(sub)
         if off not in self.benched:
             self.benched.append(off)
+        return True
+
+    def make_substitution(self, off: Player, sub: Player) -> bool:
+        """Swap an on-pitch player for a bench option, keeping player list order."""
+        if off not in self.players or sub not in self.subs:
+            return False
+        idx = self.players.index(off)
+        self.players[idx] = sub
+        sub.on_pitch = True
+        sub.injured = False
+        sub.x, sub.y = off.x, off.y
+        sub.vx = sub.vy = 0.0
+        off.on_pitch = False
+        if sub in self.subs:
+            self.subs.remove(sub)
+        if sub in self.benched:
+            self.benched.remove(sub)
+        if off not in self.benched:
+            self.benched.append(off)
     def perform_substitution(self, off: Player, sub: Player) -> bool:
         if sub not in self.subs or sub.on_pitch:
             return False
@@ -339,6 +358,18 @@ class Match:
         return None if not cand else min(cand, key=lambda p:(p.x-self.ball[0])**2 + (p.y-self.ball[1])**2)
 
     def keeper(self, team:Team):  return team.gk()
+
+    def update_bench_positions(self):
+        if not self.pr:
+            return
+        for team, _ in ((self.H, True), (self.A, False)):
+            spots = self.bench_spots.get(team, [])
+            benchers = [p for p in team.subs if not p.on_pitch]
+            benchers += [p for p in team.benched if not p.on_pitch]
+            for idx, player in enumerate(benchers):
+                if idx < len(spots):
+                    player.x, player.y = spots[idx]
+                    player.vx = player.vy = 0.0
 
     def update_bench_positions(self):
         if not self.pr:
@@ -937,6 +968,12 @@ class Match:
 
             self.ball[0] += self.bvx * dt
             self.ball[1] += self.bvy * dt
+
+        # loose ball control should be resolved immediately rather than waiting for the
+        # next simulated minute tick; otherwise the closest player appears to "teleport"
+        # the ball on the following update when capture_free_ball finally runs.
+        if self.holder is None and not self.restart:
+            self.capture_free_ball()
 
         # --- interceptions / tackles / out ---
         atk_for_path = self.last_touch_team or self.poss or self.H
