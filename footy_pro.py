@@ -58,7 +58,7 @@ COLLISION_RADIUS_PX = 20.0
 SIM_SPEEDS = [0.6, 1.05, 1.8]
 
 # =================== Models ===================
-@dataclass
+@dataclass(eq=False)
 class Player:
     name: str; pos: str; number: int
     atk: int; dfn: int; pas: int; pac: int; sta: int; dis: int; gk: int=1
