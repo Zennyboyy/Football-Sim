@@ -112,6 +112,21 @@ class Team:
         for p in self.outfield():
             p.tick_fatigue(intensity)
 
+    def make_substitution(self, off: Player, sub: Player) -> bool:
+        """Swap an on-pitch player for a bench option, keeping player list order."""
+        if off not in self.players or sub not in self.subs:
+            return False
+        idx = self.players.index(off)
+        self.players[idx] = sub
+        sub.on_pitch = True
+        sub.injured = False
+        sub.x, sub.y = off.x, off.y
+        sub.vx = sub.vy = 0.0
+        off.on_pitch = False
+        if sub in self.subs:
+            self.subs.remove(sub)
+        return True
+
 # =================== Formations & anchors ===================
 def anchors_433(left=True):
     return ([(5,34),(18,15),(22,27),(22,41),(18,53),(35,34),(45,22),(45,46),(70,16),(73,34),(70,52)]
@@ -187,8 +202,8 @@ class ManagerAI:
                 bench=[s for s in self.t.subs if not s.on_pitch and s.pos==p.pos]
                 if bench:
                     sub=max(bench, key=lambda s:(s.sta+s.pac+s.pas))
-                    sub.on_pitch=True; sub.x,sub.y=p.x,p.y; p.on_pitch=False
-                    self.subs_used+=1
+                    if self.t.make_substitution(p, sub):
+                        self.subs_used+=1
 
         # planned subs
         if self.subs_used<self.max_subs and minute>=58:
@@ -203,8 +218,8 @@ class ManagerAI:
                 if need_att: pool=[s for s in bench if s.pos=="FW"] or pool
                 if need_def: pool=[s for s in bench if s.pos=="DF"] or pool
                 sub=max(pool, key=lambda s:(s.sta+s.pac+s.pas))
-                sub.on_pitch=True; sub.x,sub.y=off.x,off.y; off.on_pitch=False
-                self.subs_used+=1; self.last_min=minute
+                if self.t.make_substitution(off, sub):
+                    self.subs_used+=1; self.last_min=minute
 def clamp(v,a,b): return max(a, min(b, v))
 
 class Match:
@@ -570,6 +585,7 @@ class Match:
         # managers
         self.aiH.decide(self.minute, self.H.goals - self.A.goals, self.H.xg, self.A.xg, self.injuries_to_process)
         self.aiA.decide(self.minute, self.A.goals - self.H.goals, self.A.xg, self.H.xg, self.injuries_to_process)
+        self.injuries_to_process = [p for p in self.injuries_to_process if p.on_pitch and p.injured]
 
         # fitness tick
         self.H.fatigue_tick()
