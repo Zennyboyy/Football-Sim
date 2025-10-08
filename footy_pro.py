@@ -60,6 +60,7 @@ class Player:
     foot: str="both"  # "left","right","both"
     fouls_committed: int=0
     injury_timer: float=0.0
+    used_sub: bool=False
 
     def o_atk(self):
         f = max(0.5, 1.0 - self.fatigue)
@@ -74,12 +75,14 @@ class Player:
         self.fatigue = min(0.7, self.fatigue + max(0.0, drain))
 
 @dataclass
+@dataclass
 class Team:
     name: str; color: Tuple[int,int,int]; alt: Tuple[int,int,int]
     players: List[Player]; subs: List[Player]
     tactic: str="balanced"; formation: str="4-3-3"; manager: str="Manager"
     goals:int=0; shots:int=0; shots_on:int=0; xg:float=0.0; yellows:int=0; reds:int=0
     benched: List[Player] = field(default_factory=list)
+
 
     def gk(self):
         for p in self.players:
@@ -130,6 +133,44 @@ class Team:
             self.benched.remove(sub)
         if off not in self.benched:
             self.benched.append(off)
+        return True
+
+    def make_substitution(self, off: Player, sub: Player) -> bool:
+        """Swap an on-pitch player for a bench option, keeping player list order."""
+        if off not in self.players or sub not in self.subs:
+            return False
+        idx = self.players.index(off)
+        self.players[idx] = sub
+        sub.on_pitch = True
+        sub.injured = False
+        sub.x, sub.y = off.x, off.y
+        sub.vx = sub.vy = 0.0
+        off.on_pitch = False
+        if sub in self.subs:
+            self.subs.remove(sub)
+        if sub in self.benched:
+            self.benched.remove(sub)
+        if off not in self.benched:
+            self.benched.append(off)
+    def perform_substitution(self, off: Player, sub: Player) -> bool:
+        if sub not in self.subs or sub.on_pitch:
+            return False
+        try:
+            idx = self.players.index(off)
+        except ValueError:
+            return False
+
+        self.subs.remove(sub)
+        sub.on_pitch = True
+        sub.used_sub = True
+        sub.x, sub.y = off.x, off.y
+        sub.vx = sub.vy = 0.0
+        self.players[idx] = sub
+
+        off.on_pitch = False
+        off.vx = off.vy = 0.0
+        off.used_sub = True
+        self.subs.append(off)
         return True
 
 # =================== Formations & anchors ===================
@@ -208,6 +249,10 @@ class ManagerAI:
                 if bench:
                     sub=max(bench, key=lambda s:(s.sta+s.pac+s.pas))
                     if self.t.make_substitution(p, sub):
+                bench=[s for s in self.t.subs if not s.on_pitch and not s.used_sub and s.pos==p.pos]
+                if bench:
+                    sub=max(bench, key=lambda s:(s.sta+s.pac+s.pas))
+                    if self.t.perform_substitution(p, sub):
                         self.subs_used+=1
 
         # planned subs
@@ -215,6 +260,7 @@ class ManagerAI:
             tired=sorted([p for p in self.t.players if p.on_pitch and p.pos!="GK"],
                          key=lambda q:q.fatigue + (0.15 if q.yellow else 0), reverse=True)
             bench=[s for s in self.t.subs if not s.on_pitch]
+            bench=[s for s in self.t.subs if not s.on_pitch and not s.used_sub]
             if tired and bench:
                 off=tired[0]
                 need_att=(diff<0 and minute>=65); need_def=(diff>0 and minute>=70)
@@ -224,6 +270,7 @@ class ManagerAI:
                 if need_def: pool=[s for s in bench if s.pos=="DF"] or pool
                 sub=max(pool, key=lambda s:(s.sta+s.pac+s.pas))
                 if self.t.make_substitution(off, sub):
+                if self.t.perform_substitution(off, sub):
                     self.subs_used+=1; self.last_min=minute
 def clamp(v,a,b): return max(a, min(b, v))
 
@@ -311,6 +358,18 @@ class Match:
         return None if not cand else min(cand, key=lambda p:(p.x-self.ball[0])**2 + (p.y-self.ball[1])**2)
 
     def keeper(self, team:Team):  return team.gk()
+
+    def update_bench_positions(self):
+        if not self.pr:
+            return
+        for team, _ in ((self.H, True), (self.A, False)):
+            spots = self.bench_spots.get(team, [])
+            benchers = [p for p in team.subs if not p.on_pitch]
+            benchers += [p for p in team.benched if not p.on_pitch]
+            for idx, player in enumerate(benchers):
+                if idx < len(spots):
+                    player.x, player.y = spots[idx]
+                    player.vx = player.vy = 0.0
 
     def update_bench_positions(self):
         if not self.pr:
