@@ -82,7 +82,7 @@ class Player:
         drain = 0.006 * intensity * (100 - (0.6*self.sta + 0.4*self.pac)) / 100
         self.fatigue = min(0.7, self.fatigue + max(0.0, drain))
 
-@dataclass(eq=False)
+@dataclass
 class Team:
     name: str; color: Tuple[int,int,int]; alt: Tuple[int,int,int]
     players: List[Player]; subs: List[Player]
